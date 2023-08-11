@@ -26,18 +26,44 @@ Year, Month, Category, Sub Category, Total Quantity Sold, Total Profit
 Try to write optimized spark operations.
  */
 public class CaseStudy1 {
-    public static void main(String[] args) {
-        String winutilPath = "C:\\Users\\Manjula\\OneDrive\\Documents\\software\\spark-3.4.1-bin-hadoop3"; //\\bin\\winutils.exe"; //bin\\winutils.exe";
-//        System.setProperty("hadoop.home.dir", winutilPath);
-//        System.setProperty("HADOOP_HOME", winutilPath);
-//        if(System.getProperty("os.name").toLowerCase().contains("win")) {
-//            System.out.println("Detected windows");
-//            System.setProperty("hadoop.home.dir", winutilPath);
-//            System.setProperty("HADOOP_HOME", winutilPath);
-//        }
 
-        String INPUT_PATH_SALES="C:\\Users\\Manjula\\OneDrive\\Documents\\abhi\\Jigsaw L2\\case study 1\\dataset\\Global Superstore Sales - Global Superstore Sales.csv";
-        String INPUT_PATH_RETURNS="C:\\Users\\Manjula\\OneDrive\\Documents\\abhi\\Jigsaw L2\\case study 1\\dataset\\Global Superstore Sales - Global Superstore Returns.csv";
+    public static Dataset<Row> readCsv(SparkSession spark, String INPUT_PATH){
+        Dataset<Row> inputDf = spark.read()
+                .option("header", "true")
+                .option("inferSchema", "true")
+                .csv(INPUT_PATH);
+        return  inputDf;
+    }
+    public static Dataset<Row> cleanDf(Dataset<Row> df){
+        Dataset<Row> cleanedDf =
+                df.withColumn("Year",split(col("Order Date"), "[-/]").getItem(2))
+                        .withColumn("Month",split(col("Order Date"), "[-/]").getItem(0))
+                        .withColumn("Profit_num", regexp_replace(col("Profit"),"[$]","").cast("Double"))
+                        .select("Year","Month","Order ID","Category", "Sub-Category","Profit_num","Quantity");
+        return cleanedDf;
+    }
+
+    public static Dataset<Row> aggregateProfitAndQuantity(Dataset<Row> df, WindowSpec windowSpec){
+        return
+                df.withColumn("Total Profit", functions.sum("Profit_num").over(windowSpec))
+                        .withColumn("Total Quantity Sold", functions.sum("Quantity").over(windowSpec))
+                        .select("Year", "Month", "Category", "Sub-Category","Total Quantity Sold","Total Profit")
+                        .dropDuplicates();
+    }
+
+    static void writeCsv(Dataset<Row> df, String OUTPUT_PATH, String... PartitionColumns){
+        df.write().option("header","true")
+                .partitionBy(PartitionColumns)
+                .mode("overwrite")
+                .csv(OUTPUT_PATH);
+
+    }
+
+    public static void main(String[] args) {
+
+        String INPUT_PATH_SALES=args[0];
+        String INPUT_PATH_RETURNS=args[1];
+        String OUTPUT_PATH=args[2];
 
         SparkSession spark = SparkSession
                 .builder()
@@ -45,51 +71,31 @@ public class CaseStudy1 {
                 .master("local[*]")
                 .getOrCreate();
 
-        Dataset<Row> salesDf = spark.read()
-                .option("header", "true")
-                .option("inferSchema", "true")
-                .csv(INPUT_PATH_SALES);
+        //read csv source files
+        Dataset<Row> salesDf = readCsv(spark,INPUT_PATH_SALES);
+        Dataset<Row> returnsDf = readCsv(spark,INPUT_PATH_RETURNS);
 
-        Dataset<Row> returnsDf = spark.read()
-                .option("header", "true")
-                .option("inferSchema", "true")
-                .csv(INPUT_PATH_RETURNS);
+        //clean source data
+        Dataset<Row> cleanedSalesDf =cleanDf(salesDf);
 
-
-
-
-
-        spark.sql("set spark.sql.legacy.timeParserPolicy=LEGACY");
-
-        Dataset<Row> cleanedSalesDf =
-                salesDf.withColumn("Year",split(col("Order Date"), "[-/]").getItem(2))
-                        .withColumn("Month",split(col("Order Date"), "[-/]").getItem(0))
-                        .withColumn("Profit_num", regexp_replace(col("Profit"),"[$]","").cast("int"))
-                        .select("Year","Month","Order ID","Category", "Sub-Category","Profit_num","Quantity");
-
-        cleanedSalesDf.printSchema();
-
+        //creating temp view
         cleanedSalesDf.createOrReplaceTempView("SALES");
         returnsDf.createOrReplaceTempView("RETURNS");
 
+        //joining sales & returns data
         Dataset<Row> joinDF = spark.sql(
                 "SELECT s.*,Returned FROM SALES s LEFT OUTER JOIN RETURNS r ON s.`Order ID` == r.`Order ID` where Returned is null"
         );
 
-        joinDF.printSchema();
-
+        //aggregation window
         WindowSpec windowSpec = Window.partitionBy("Year", "Month", "Category", "Sub-Category");
-        Dataset<Row> reportDf = joinDF.withColumn("Total Profit", functions.sum("Profit_num").over(windowSpec))
-                .withColumn("Total Quantity Sold", functions.sum("Quantity").over(windowSpec))
-                .select("Year", "Month", "Category", "Sub-Category","Total Quantity Sold","Total Profit")
-                .dropDuplicates();
 
-        System.out.println("count: "+reportDf.count());
+        //aggregation for report
+        Dataset<Row> reportDf = aggregateProfitAndQuantity(joinDF, windowSpec);
 
-        reportDf.write().option("header","true")
-        .partitionBy("Year", "Month")
-        .mode("overwrite")
-        .csv("C:/Users/Manjula/OneDrive/Documents/abhi/Jigsaw L2/case study 1/output");
+        //writing output partitioned by (year,month)
+        writeCsv(reportDf,OUTPUT_PATH,"Year", "Month");
+
     }
 
 }
